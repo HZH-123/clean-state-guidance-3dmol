@@ -1,0 +1,389 @@
+import argparse
+import os
+import shutil
+import time
+
+import numpy as np
+import torch
+from torch_geometric.data import Batch
+from torch_geometric.transforms import Compose
+from torch_scatter import scatter_sum, scatter_mean
+from tqdm.auto import tqdm
+
+import utils.misc as misc
+import utils.transforms as trans
+from datasets import get_dataset
+from datasets.pl_data import FOLLOW_BATCH
+from models.molopt_score_model import ScorePosNet3D, log_sample_categorical
+from utils.evaluation import atom_num
+
+from utils.misc_prop import get_model as get_guide_model
+from utils.transforms_prop import FeaturizeProteinAtom as GuideFeaturizeProteinAtom
+from utils.transforms_prop import FollowerFeaturizeLigandAtom as GuideFeaturizeLigandAtom
+from datasets.protein_ligand import KMAP
+
+'''
+Main Script for Gradient Guidance
+'''
+
+GUIDE_SCORE_KEYS = ('ba', 'qed', 'sa')
+
+
+def unbatch_v_traj(ligand_v_traj, n_data, ligand_cum_atoms):
+    if len(ligand_v_traj) == 0:
+        return [[] for _ in range(n_data)]
+    all_step_v = [[] for _ in range(n_data)]
+    for v in ligand_v_traj:  # step_i
+        v_array = v.cpu().numpy()
+        for k in range(n_data):
+            all_step_v[k].append(v_array[ligand_cum_atoms[k]:ligand_cum_atoms[k + 1]])
+    all_step_v = [np.stack(step_v) for step_v in all_step_v]  # num_samples * [num_steps, num_atoms_i]
+    return all_step_v
+
+
+def unbatch_scalar_traj(score_traj, n_data):
+    if len(score_traj) == 0:
+        return []
+    all_step_scores = [[] for _ in range(n_data)]
+    for scores in score_traj:
+        score_array = torch.as_tensor(scores).cpu().numpy().astype(np.float64)
+        for k in range(n_data):
+            all_step_scores[k].append(score_array[k])
+    return [np.asarray(step_scores, dtype=np.float64) for step_scores in all_step_scores]
+
+
+def validate_result_schema(result):
+    required_keys = [
+        'pred_ligand_pos0_traj',
+        'pred_ligand_pos0_guided_traj',
+        'guidance_abs_shift',
+        'guidance_rel_shift',
+        'guide_scores_traj',
+    ]
+    for key in required_keys:
+        if key not in result:
+            raise KeyError(f'Missing required result key: {key}')
+
+    pos0_traj = result['pred_ligand_pos0_traj']
+    pos0_guided_traj = result['pred_ligand_pos0_guided_traj']
+    if len(pos0_traj) != len(pos0_guided_traj):
+        raise ValueError('pred_ligand_pos0_traj and pred_ligand_pos0_guided_traj must have identical sample counts.')
+    for sample_idx, (pos0, pos0_guided) in enumerate(zip(pos0_traj, pos0_guided_traj)):
+        if np.asarray(pos0).shape != np.asarray(pos0_guided).shape:
+            raise ValueError(f'Guided and unguided pos0 traj shapes differ for sample {sample_idx}.')
+
+    guide_scores_traj = result['guide_scores_traj']
+    for key in GUIDE_SCORE_KEYS:
+        if key not in guide_scores_traj:
+            raise KeyError(f'Missing guide score key: {key}')
+
+
+def sample_guided_diffusion_ligand(model, guide_models, guide_configs, data, num_samples, batch_size=16, device='cuda:0',
+                            num_steps=None, pos_only=False, center_pos_mode='protein',
+                            guide_representation='noisy',
+                            gradient_scale_cord=1.0,
+                            gradient_scale_cord_clean=1.0,
+                            save_guided_traj=True,
+                            save_traj_mode='full',
+                            sample_num_atoms='prior',
+                            save_full_traj_for_first_n=0):
+    model.eval()
+    for guide_model in guide_models:
+        guide_model.eval()
+    all_pred_pos, all_pred_v = [], []
+    all_pred_pos_traj, all_pred_pos0_traj, all_pred_pos0_guided_traj, all_pred_v_traj = [], [], [], []
+    all_pred_v0_traj, all_pred_vt_traj = [], []
+    all_guidance_abs_shift, all_guidance_rel_shift = [], []
+    all_guide_scores_traj = {key: [] for key in GUIDE_SCORE_KEYS}
+    time_list = []
+    num_batch = int(np.ceil(num_samples / batch_size))
+    current_i = 0
+    for i in tqdm(range(num_batch)):
+        n_data = batch_size if i < num_batch - 1 else num_samples - batch_size * (num_batch - 1)
+        batch = Batch.from_data_list([data.clone() for _ in range(n_data)], follow_batch=FOLLOW_BATCH).to(device)
+
+        t1 = time.time()
+        with torch.no_grad():
+            batch_protein = batch.protein_element_batch
+            if sample_num_atoms == 'prior':
+                pocket_size = atom_num.get_space_size(batch.protein_pos.detach().cpu().numpy())
+                ligand_num_atoms = [atom_num.sample_atom_num(pocket_size).astype(int) for _ in range(n_data)]
+                batch_ligand = torch.repeat_interleave(torch.arange(n_data), torch.tensor(ligand_num_atoms)).to(device)
+            elif sample_num_atoms == 'range':
+                ligand_num_atoms = list(range(current_i + 1, current_i + n_data + 1))
+                batch_ligand = torch.repeat_interleave(torch.arange(n_data), torch.tensor(ligand_num_atoms)).to(device)
+            elif sample_num_atoms == 'ref':
+                batch_ligand = batch.ligand_element_batch
+                ligand_num_atoms = scatter_sum(torch.ones_like(batch_ligand), batch_ligand, dim=0).tolist()
+            else:
+                raise ValueError
+
+            # init ligand pos
+            center_pos = scatter_mean(batch.protein_pos, batch_protein, dim=0)
+            batch_center_pos = center_pos[batch_ligand]
+            init_ligand_pos = batch_center_pos + torch.randn_like(batch_center_pos)
+
+            # init ligand v
+            if pos_only:
+                init_ligand_v = batch.ligand_atom_feature_full
+            else:
+                uniform_logits = torch.zeros(len(batch_ligand), model.num_classes).to(device)
+                init_ligand_v = log_sample_categorical(uniform_logits)
+
+            r = model.sample_multi_guided_diffusion(
+                guide_models=guide_models,
+                guide_configs=guide_configs,
+                n_data=n_data,
+                device=device,
+                protein_pos=batch.protein_pos,
+                protein_v=batch.protein_atom_feature.float(),
+                batch_protein=batch_protein,
+
+                init_ligand_pos=init_ligand_pos,
+                init_ligand_v=init_ligand_v,
+                batch_ligand=batch_ligand,
+                num_steps=num_steps,
+                pos_only=pos_only,
+                center_pos_mode=center_pos_mode,
+                guide_representation=guide_representation,
+                gradient_scale_cord=gradient_scale_cord,
+                gradient_scale_cord_clean=gradient_scale_cord_clean,
+                save_guided_traj=save_guided_traj,
+                save_traj_mode=save_traj_mode
+            )
+            ligand_pos, ligand_v, ligand_pos_traj, ligand_v_traj = r['pos'], r['v'], r['pos_traj'], r['v_traj']
+            ligand_v0_traj, ligand_vt_traj, ligand_pos0_traj = r['v0_traj'], r['vt_traj'], r['pos0_traj']
+            ligand_pos0_guided_traj = r['pos0_guided_traj']
+            guidance_abs_shift = r['guidance_abs_shift'].cpu().numpy().astype(np.float64)
+            guidance_rel_shift = r['guidance_rel_shift'].cpu().numpy().astype(np.float64)
+            guide_scores_traj = r['guide_scores_traj']
+            # unbatch pos
+            ligand_cum_atoms = np.cumsum([0] + ligand_num_atoms)
+            ligand_pos_array = ligand_pos.cpu().numpy().astype(np.float64)
+            all_pred_pos += [ligand_pos_array[ligand_cum_atoms[k]:ligand_cum_atoms[k + 1]] for k in
+                                range(n_data)]  # num_samples * [num_atoms_i, 3]
+
+            all_step_pos = [[] for _ in range(n_data)]
+            for p in ligand_pos_traj:  # step_i
+                p_array = p.cpu().numpy().astype(np.float64)
+                for k in range(n_data):
+                    all_step_pos[k].append(p_array[ligand_cum_atoms[k]:ligand_cum_atoms[k + 1]])
+            all_step_pos = [np.stack(step_pos) for step_pos in
+                            all_step_pos]  # num_samples * [num_steps, num_atoms_i, 3]
+            all_pred_pos_traj += [p for p in all_step_pos]
+            
+            all_step_pos0 = [[] for _ in range(n_data)]
+            for p in ligand_pos0_traj:  # step_i
+                p_array = p.cpu().numpy().astype(np.float64)
+                for k in range(n_data):
+                    all_step_pos0[k].append(p_array[ligand_cum_atoms[k]:ligand_cum_atoms[k + 1]])
+            all_step_pos0 = [np.stack(step_pos) for step_pos in
+                            all_step_pos0]  # num_samples * [num_steps, num_atoms_i, 3]
+            all_pred_pos0_traj += [p for p in all_step_pos0]
+
+            all_step_pos0_guided = [[] for _ in range(n_data)]
+            for p in ligand_pos0_guided_traj:  # step_i
+                p_array = p.cpu().numpy().astype(np.float64)
+                for k in range(n_data):
+                    all_step_pos0_guided[k].append(p_array[ligand_cum_atoms[k]:ligand_cum_atoms[k + 1]])
+            all_step_pos0_guided = [np.stack(step_pos) for step_pos in
+                                    all_step_pos0_guided]  # num_samples * [num_steps, num_atoms_i, 3]
+            all_pred_pos0_guided_traj += [p for p in all_step_pos0_guided]
+
+            # unbatch v
+            ligand_v_array = ligand_v.cpu().numpy()
+            all_pred_v += [ligand_v_array[ligand_cum_atoms[k]:ligand_cum_atoms[k + 1]] for k in range(n_data)]
+            all_guidance_abs_shift += [float(guidance_abs_shift[k]) for k in range(n_data)]
+            all_guidance_rel_shift += [float(guidance_rel_shift[k]) for k in range(n_data)]
+
+            all_step_v = unbatch_v_traj(ligand_v_traj, n_data, ligand_cum_atoms)
+            all_pred_v_traj += [v for v in all_step_v]
+            for key in GUIDE_SCORE_KEYS:
+                all_guide_scores_traj[key] += unbatch_scalar_traj(guide_scores_traj.get(key, []), n_data)
+
+            if not pos_only:
+                all_step_v0 = unbatch_v_traj(ligand_v0_traj, n_data, ligand_cum_atoms)
+                all_pred_v0_traj += [v for v in all_step_v0]
+                all_step_vt = unbatch_v_traj(ligand_vt_traj, n_data, ligand_cum_atoms)
+                all_pred_vt_traj += [v for v in all_step_vt]
+        t2 = time.time()
+        time_list.append(t2 - t1)
+        current_i += n_data
+    # Limit full trajectory to first n samples if specified
+    if save_full_traj_for_first_n > 0:
+        # Keep full traj only for first n samples, empty lists for others
+        all_pred_pos_traj = all_pred_pos_traj[:save_full_traj_for_first_n] + [[] for _ in range(len(all_pred_pos_traj) - save_full_traj_for_first_n)] if len(all_pred_pos_traj) > save_full_traj_for_first_n else all_pred_pos_traj
+        all_pred_v_traj = all_pred_v_traj[:save_full_traj_for_first_n] + [[] for _ in range(len(all_pred_v_traj) - save_full_traj_for_first_n)] if len(all_pred_v_traj) > save_full_traj_for_first_n else all_pred_v_traj
+        all_pred_v0_traj = all_pred_v0_traj[:save_full_traj_for_first_n] + [[] for _ in range(len(all_pred_v0_traj) - save_full_traj_for_first_n)] if len(all_pred_v0_traj) > save_full_traj_for_first_n else all_pred_v0_traj
+        all_pred_vt_traj = all_pred_vt_traj[:save_full_traj_for_first_n] + [[] for _ in range(len(all_pred_vt_traj) - save_full_traj_for_first_n)] if len(all_pred_vt_traj) > save_full_traj_for_first_n else all_pred_vt_traj
+        all_pred_pos0_traj = all_pred_pos0_traj[:save_full_traj_for_first_n] + [[] for _ in range(len(all_pred_pos0_traj) - save_full_traj_for_first_n)] if len(all_pred_pos0_traj) > save_full_traj_for_first_n else all_pred_pos0_traj
+        all_pred_pos0_guided_traj = all_pred_pos0_guided_traj[:save_full_traj_for_first_n] + [[] for _ in range(len(all_pred_pos0_guided_traj) - save_full_traj_for_first_n)] if len(all_pred_pos0_guided_traj) > save_full_traj_for_first_n else all_pred_pos0_guided_traj
+
+    return all_pred_pos, all_pred_v, all_pred_pos_traj, all_pred_v_traj, all_pred_v0_traj, all_pred_vt_traj, all_pred_pos0_traj, all_pred_pos0_guided_traj, all_guidance_abs_shift, all_guidance_rel_shift, all_guide_scores_traj, time_list
+
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('config', type=str)
+    parser.add_argument('-i', '--data_id', type=int)
+    parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--batch_size', type=int, default=100)
+    parser.add_argument('--result_path', type=str, default='./outputs')
+    args = parser.parse_args()
+
+    logger = misc.get_logger('sampling')
+
+    # Load config
+    config = misc.load_config(args.config)
+    logger.info(config)
+    misc.seed_all(config.sample.seed)
+
+    device = args.device
+
+    # Load checkpoint
+    ckpt = torch.load(config.model.checkpoint, map_location=device, weights_only=False)
+    logger.info(f"Training Config: {ckpt['config']}")
+
+    # Transforms
+    protein_featurizer = trans.FeaturizeProteinAtom()
+    ligand_atom_mode = ckpt['config'].data.transform.ligand_atom_mode
+    ligand_featurizer = trans.FeaturizeLigandAtom(ligand_atom_mode)
+    transform = Compose([
+        protein_featurizer,
+        ligand_featurizer,
+        trans.FeaturizeLigandBond(),
+    ])
+
+    # Load dataset
+    dataset, subsets = get_dataset(
+        config=ckpt['config'].data,
+        transform=transform
+    )
+    train_set, test_set = subsets['train'], subsets['test']
+    logger.info(f'Successfully load the dataset (size: {len(test_set)})!')
+
+    # Load model
+    model = ScorePosNet3D(
+        ckpt['config'].model,
+        protein_atom_feature_dim=protein_featurizer.feature_dim,
+        ligand_atom_feature_dim=ligand_featurizer.feature_dim
+    ).to(device)
+    model.load_state_dict(ckpt['model'], strict=False if 'train_config' in config.model else True)
+    logger.info(f'Successfully load the model! {config.model.checkpoint}')
+
+    # Guide Transforms
+    guide_protein_featurizer = GuideFeaturizeProteinAtom()
+    guide_ligand_featurizer = GuideFeaturizeLigandAtom(mode=ckpt['config']['data']['transform']['ligand_atom_mode'])
+    guide_transform = Compose([
+        guide_protein_featurizer,
+        guide_ligand_featurizer,
+    ])
+
+    guide_models = []
+    for guide_model_config in config.guide_models:
+        # Load Guide Checkpoint
+        guide_ckpt = torch.load(guide_model_config.checkpoint, map_location=device, weights_only=False)
+        logger.info(f"Guide Name: {guide_model_config.name}")
+        logger.info(f"Guide Training Config: {guide_ckpt['config']}")
+
+        # Guide model
+        guide_model = get_guide_model(guide_ckpt['config'], guide_protein_featurizer.feature_dim, guide_ligand_featurizer.feature_dim)
+        guide_model.load_state_dict(guide_ckpt['model'])
+        guide_model = guide_model.to(device)
+        guide_model.eval()
+        guide_models.append(guide_model)
+
+    data = test_set[args.data_id]
+    pred_pos, pred_v, pred_pos_traj, pred_v_traj, pred_v0_traj, pred_vt_traj, pred_pos0_traj, pred_pos0_guided_traj, guidance_abs_shift, guidance_rel_shift, guide_scores_traj, time_list  = sample_guided_diffusion_ligand(
+        model=model,
+        guide_models=guide_models,
+        guide_configs=config.guide_models,
+        data=data,
+        num_samples=config.sample.num_samples,
+        
+        batch_size=args.batch_size, 
+        device=args.device,
+        num_steps=config.sample.num_steps,
+        pos_only=config.sample.pos_only,
+        center_pos_mode=config.sample.center_pos_mode,
+        guide_representation=config.sample.get('guide_representation', 'noisy'),
+        gradient_scale_cord=config.sample.get('gradient_scale_cord', config.guide_models[0].get('gradient_scale_cord', 1.0)),
+        gradient_scale_cord_clean=config.sample.get('gradient_scale_cord_clean', config.guide_models[0].get('gradient_scale_cord_clean', config.sample.get('gradient_scale_cord', config.guide_models[0].get('gradient_scale_cord', 1.0)))),
+        save_guided_traj=config.sample.get('save_guided_traj', True),
+        save_traj_mode=config.sample.get('save_traj_mode', 'full'),
+        sample_num_atoms=config.sample.sample_num_atoms,
+        save_full_traj_for_first_n=config.sample.get('save_full_traj_for_first_n', 0)
+    )
+    # No trajectory saved - save only final positions and properties
+    result = {
+        'data': data,
+        'pred_ligand_pos': pred_pos,
+        'pred_ligand_v': pred_v,
+        'guidance_abs_shift': guidance_abs_shift,
+        'guidance_rel_shift': guidance_rel_shift,
+        'guide_scores_traj': guide_scores_traj,
+        'time': time_list
+    }
+    # Skip validation for no-trajectory mode
+    # validate_result_schema(result)
+    logger.info('Sample done!')
+
+    result_path = args.result_path
+    os.makedirs(result_path, exist_ok=True)
+    shutil.copyfile(args.config, os.path.join(result_path, 'sample.yml'))
+    torch.save(result, os.path.join(result_path, f'result_{args.data_id}.pt'))
+
+
+    
+
+    # batch_size = 4
+    # sample_num_atoms=config.sample.sample_num_atoms
+    # pos_only=False
+    # num_steps=config.sample.num_steps
+    # center_pos_mode=config.sample.center_pos_mode
+
+    # batch = Batch.from_data_list([data.clone() for _ in range(batch_size)], follow_batch=FOLLOW_BATCH).to(device)
+    
+    # batch_protein = batch.protein_element_batch
+    # if sample_num_atoms == 'prior':
+    #     pocket_size = atom_num.get_space_size(batch.protein_pos.detach().cpu().numpy())
+    #     ligand_num_atoms = [atom_num.sample_atom_num(pocket_size).astype(int) for _ in range(batch_size)]
+    #     batch_ligand = torch.repeat_interleave(torch.arange(batch_size), torch.tensor(ligand_num_atoms)).to(device)
+    # # elif sample_num_atoms == 'range':
+    # #     ligand_num_atoms = list(range(current_i + 1, current_i + n_data + 1))
+    # #     batch_ligand = torch.repeat_interleave(torch.arange(n_data), torch.tensor(ligand_num_atoms)).to(device)
+    # # elif sample_num_atoms == 'ref':
+    # #     batch_ligand = batch.ligand_element_batch
+    # #     ligand_num_atoms = scatter_sum(torch.ones_like(batch_ligand), batch_ligand, dim=0).tolist()
+    # # else:
+    # #     raise ValueError
+
+    # # init ligand pos
+    # center_pos = scatter_mean(batch.protein_pos, batch_protein, dim=0)
+    # batch_center_pos = center_pos[batch_ligand]
+    # init_ligand_pos = batch_center_pos + torch.randn_like(batch_center_pos)
+
+    # # init ligand v
+    # if pos_only:
+    #     init_ligand_v = batch.ligand_atom_feature_full
+    # else:
+    #     uniform_logits = torch.zeros(len(batch_ligand), model.num_classes).to(device)
+    #     init_ligand_v = log_sample_categorical(uniform_logits)
+
+    # kind = torch.tensor([KMAP['Kd']]*batch_size).to(device)
+    # r = model.sample_guided_diffusion(
+    #     guide_model=guide_model,
+    #     gradient_scale=1.0,
+    #     kind=kind,
+    #     protein_pos=batch.protein_pos,
+    #     protein_v=batch.protein_atom_feature.float(),
+    #     batch_protein=batch_protein,
+
+    #     init_ligand_pos=init_ligand_pos,
+    #     init_ligand_v=init_ligand_v,
+    #     batch_ligand=batch_ligand,
+    #     num_steps=num_steps,
+    #     pos_only=pos_only,
+    #     center_pos_mode=center_pos_mode
+    # )

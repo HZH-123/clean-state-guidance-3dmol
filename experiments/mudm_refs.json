@@ -1,0 +1,162 @@
+{
+  "single": {
+    "cv": {
+      "display_name": "Cv",
+      "paper_unit": "cal/mol K",
+      "ubound": "6.879 +/- 0.015",
+      "num_atoms": "1.971",
+      "cond_edm": "1.065 +/- 0.010",
+      "cond_geoldm": "1.025",
+      "eegsde": "0.941 +/- 0.005",
+      "lbound": "0.040",
+      "mudm_mean": 0.29,
+      "mudm_std": 0.024
+    },
+    "mu": {
+      "display_name": "mu",
+      "paper_unit": "D",
+      "ubound": "1.613 +/- 0.003",
+      "num_atoms": "1.053",
+      "cond_edm": "1.123 +/- 0.013",
+      "cond_geoldm": "1.108",
+      "eegsde": "0.777 +/- 0.007",
+      "lbound": "0.043",
+      "mudm_mean": 0.333,
+      "mudm_std": 0.015
+    },
+    "alpha": {
+      "display_name": "alpha",
+      "paper_unit": "Bohr^3",
+      "ubound": "8.980 +/- 0.020",
+      "num_atoms": "3.860",
+      "cond_edm": "2.780 +/- 0.040",
+      "cond_geoldm": "2.370",
+      "eegsde": "2.500 +/- 0.020",
+      "lbound": "0.090",
+      "mudm_mean": 0.43,
+      "mudm_std": 0.07
+    },
+    "deltae": {
+      "display_name": "deltae",
+      "paper_unit": "meV",
+      "ubound": "1464.000 +/- 4.000",
+      "num_atoms": "866.000",
+      "cond_edm": "671.000 +/- 5.000",
+      "cond_geoldm": "587.000",
+      "eegsde": "487.000 +/- 3.000",
+      "lbound": "65.000",
+      "mudm_mean": 85.0,
+      "mudm_std": 6.0
+    },
+    "ehomo": {
+      "display_name": "ehomo",
+      "paper_unit": "meV",
+      "ubound": "645.000 +/- 41.000",
+      "num_atoms": "426.000",
+      "cond_edm": "371.000 +/- 2.000",
+      "cond_geoldm": "340.000",
+      "eegsde": "302.000 +/- 2.000",
+      "lbound": "39.000",
+      "mudm_mean": 72.0,
+      "mudm_std": 4.0
+    },
+    "elumo": {
+      "display_name": "elumo",
+      "paper_unit": "meV",
+      "ubound": "1457.000 +/- 5.000",
+      "num_atoms": "813.000",
+      "cond_edm": "601.000 +/- 7.000",
+      "cond_geoldm": "522.000",
+      "eegsde": "447.000 +/- 6.000",
+      "lbound": "36.000",
+      "mudm_mean": 133.0,
+      "mudm_std": 11.0
+    }
+  },
+  "multi": [
+    {
+      "task_id": "cv_mu",
+      "display_name": "Cv + mu",
+      "objectives": ["cv", "mu"],
+      "correlation": 0.42,
+      "cond_edm": [1.079, 1.156],
+      "eegsde": [0.981, 0.912],
+      "mudm": [1.466, 0.687],
+      "paper_units": ["cal/mol K", "D"],
+      "atom_stability": 0.72,
+      "novelty": 0.84
+    },
+    {
+      "task_id": "deltae_mu",
+      "display_name": "deltae + mu",
+      "objectives": ["deltae", "mu"],
+      "correlation": -0.34,
+      "cond_edm": [683.0, 1.130],
+      "eegsde": [563.0, 0.866],
+      "mudm": [554.0, 0.578],
+      "paper_units": ["meV", "D"],
+      "atom_stability": 0.66,
+      "novelty": 0.92
+    },
+    {
+      "task_id": "alpha_mu",
+      "display_name": "alpha + mu",
+      "objectives": ["alpha", "mu"],
+      "correlation": -0.24,
+      "cond_edm": [2.760, 1.158],
+      "eegsde": [2.610, 0.855],
+      "mudm": [1.326, 0.519],
+      "paper_units": ["Bohr^3", "D"],
+      "atom_stability": 0.7,
+      "novelty": 0.88
+    },
+    {
+      "task_id": "ehomo_elumo",
+      "display_name": "ehomo + elumo",
+      "objectives": ["ehomo", "elumo"],
+      "correlation": 0.22,
+      "cond_edm": [372.0, 594.0],
+      "eegsde": [335.0, 517.0],
+      "mudm": [317.0, 455.0],
+      "paper_units": ["meV", "meV"],
+      "atom_stability": 0.67,
+      "novelty": 0.93
+    },
+    {
+      "task_id": "elumo_mu",
+      "display_name": "elumo + mu",
+      "objectives": ["elumo", "mu"],
+      "correlation": -0.40,
+      "cond_edm": [610.0, 1.143],
+      "eegsde": [526.0, 0.860],
+      "mudm": [575.0, 0.497],
+      "paper_units": ["meV", "D"],
+      "atom_stability": 0.68,
+      "novelty": 0.9
+    },
+    {
+      "task_id": "elumo_deltae",
+      "display_name": "elumo + deltae",
+      "objectives": ["elumo", "deltae"],
+      "correlation": 0.89,
+      "cond_edm": [1097.0, 712.0],
+      "eegsde": [546.0, 589.0],
+      "mudm": [361.0, 228.0],
+      "paper_units": ["meV", "meV"],
+      "atom_stability": null,
+      "novelty": null
+    },
+    {
+      "task_id": "ehomo_deltae",
+      "display_name": "ehomo + deltae",
+      "objectives": ["ehomo", "deltae"],
+      "correlation": -0.24,
+      "cond_edm": [578.0, 655.0],
+      "eegsde": [567.0, 323.0],
+      "mudm": [262.0, 489.0],
+      "paper_units": ["meV", "meV"],
+      "atom_stability": null,
+      "novelty": null
+    }
+  ]
+}

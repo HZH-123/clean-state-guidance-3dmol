@@ -1,0 +1,60 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# Virtual environments and local tooling
+.venv/
+venv/
+env/
+.env
+.idea/
+.vscode/
+.claude/
+CLAUDE.md
+
+# Logs and temporary outputs
+*.log
+*.new
+logs/
+tmp/
+outputs/
+
+# Data, experiment outputs, and generated artifacts
+.data/
+data/
+results/
+experiments_multi/
+
+# Model checkpoints and binary tensors
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.pickle
+*.npz
+*.npy
+*.lmdb
+
+# Molecular dataset/output formats
+*.sdf
+*.sdf.csv
+*.mol2
+*.pdbqt
+*.pqr
+*.smol
+*.zip
+
+# Project-specific generated directories
+models/data/
+models/logs/
+models/unimol_tox21_finetuned_model/
+semla-flow/data/
+semla-flow/models/
+TAGMol/data/
+TAGMol/logs/
+TAGMol/pretrained_models/
+TAGMol/tmp/
+TAGMol/experiments_multi/
+TAGMol/#!/

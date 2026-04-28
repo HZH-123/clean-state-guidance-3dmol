@@ -1,0 +1,20 @@
+================================================================================
+This special data package contains 19037 protein-ligand complexes, 143 nucleic
+acid complexes, 2798 protein-protein complexes, and 1032 protein-nucleic acid 
+complexes in PDBbind v2020 that also remain in PDBbind v2024. 
+
+Importantly, the structure files of each complex in this data package are from 
+PDBbind v2024, i.e. they are re-processed with the refined workflow that is 
+mentioned on our PDBbind+ web site. In general, these re-processed structure 
+files are in a better quality as compared to those included in PDBbind v2020.    
+Besides, information associated with a certain number of complexes, such as 
+binding data, have been updated in the index files as well. 
+
+This data package is free to access for registered users of the PDBbind+ web 
+site. It thus gives the users a chance to test the newly processed complex
+structures in the PDBbind data package before purchasing any newer version of 
+PDBbind. Application of this new data set, although it does not go beyond v.2020, 
+to tasks like model training may yield improved outcomes.
+
+Edited by Prof. Renxiao Wang, Latest update: Aug 4th, 2025
+================================================================================
