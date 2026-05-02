@@ -10,7 +10,6 @@ The project focuses on clean-state guidance. For 3D generators with clean-state 
 - Single-objective and dual-objective property control: supports QM9 properties including `mu`, `alpha`, `cv`, `ehomo`, `elumo`, and `deltae`.
 - Mechanism ablations: switches only the guidance representation while keeping the backbone, predictor, target conditions, loss, sampling budget, and schedule fixed.
 - Trajectory analysis: records property errors on both the noisy current state and the predicted clean-state estimate during sampling.
-- TAGMol transfer: applies the same representation replacement principle to target-aware diffusion for binding affinity, QED, and SA objectives.
 
 ## Repository Layout
 
@@ -23,10 +22,6 @@ The project focuses on clean-state guidance. For 3D generators with clean-state 
 |   |-- semlaflow/qm9_guided.py  # Main QM9 guided generation entry point
 |   |-- semlaflow/models/fm.py   # Integrator implementation for guidance_source
 |   `-- environment.yaml         # SemlaFlow/QM9 environment
-`-- TAGMol/                      # TAGMol target-aware diffusion transfer experiments
-    |-- configs/                 # Training and sampling configs
-    |-- scripts/                 # TAGMol training, sampling, and evaluation scripts
-    `-- models/molopt_score_model.py
 ```
 
 ## Environment
@@ -37,20 +32,6 @@ For the QM9/SemlaFlow code, create the environment from `semla-flow/environment.
 conda env create -f semla-flow/environment.yaml
 conda activate equinv
 pip install -r semla-flow/extra_requirements.txt
-```
-
-The TAGMol code depends on Python 3.8, PyTorch 1.13, PyTorch Geometric, RDKit, OpenBabel, and Vina. See `TAGMol/README.md` for the full installation commands. Before running TAGMol scripts, add the `TAGMol` root directory to `PYTHONPATH`:
-
-```bash
-cd TAGMol
-export PYTHONPATH=".":$PYTHONPATH
-```
-
-For PowerShell:
-
-```powershell
-cd TAGMol
-$env:PYTHONPATH=".;$env:PYTHONPATH"
 ```
 
 ## Data and Models
@@ -152,39 +133,4 @@ Generate the trajectory analysis report and plots:
 python experiments/make_qm9_trace_analysis_report.py \
   --input_dirs results/qm9_multi_ablation \
   --output_dir results/qm9_trace_analysis
-```
-
-## TAGMol Transfer Experiment
-
-The TAGMol transfer experiment is located under `TAGMol/`. Clean-state guidance is controlled by:
-
-```yaml
-sample:
-  guide_representation: clean
-```
-
-The corresponding implementation is in `TAGMol/models/molopt_score_model.py`:
-
-- `guide_representation: noisy`: computes guide gradients on noisy ligand coordinates and directly shifts the diffusion posterior mean.
-- `guide_representation: clean`: computes guide gradients on the model-predicted `x0_hat`, corrects `x0_hat`, and then recomputes the posterior mean.
-
-Example sampling run for one test pocket:
-
-```bash
-cd TAGMol
-python scripts/sample_multi_guided_diffusion_light.py \
-  configs/best_config_light.yml \
-  --data_id 0 \
-  --device cuda:0 \
-  --batch_size 100 \
-  --result_path experiments_multi/full_best_config_light
-```
-
-Evaluate generated molecules:
-
-```bash
-python scripts/evaluate_diffusion.py \
-  experiments_multi/full_best_config_light \
-  --docking_mode vina_score \
-  --protein_root data/test_set
 ```

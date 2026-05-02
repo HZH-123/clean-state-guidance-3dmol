@@ -20,12 +20,12 @@ CLAUDE.md
 logs/
 tmp/
 outputs/
+zenodo_uploads/
 
 # Data, experiment outputs, and generated artifacts
 .data/
 data/
 results/
-experiments_multi/
 
 # Model checkpoints and binary tensors
 *.pt
@@ -52,9 +52,3 @@ models/logs/
 models/unimol_tox21_finetuned_model/
 semla-flow/data/
 semla-flow/models/
-TAGMol/data/
-TAGMol/logs/
-TAGMol/pretrained_models/
-TAGMol/tmp/
-TAGMol/experiments_multi/
-TAGMol/#!/
